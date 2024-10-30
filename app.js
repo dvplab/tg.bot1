@@ -41,7 +41,8 @@ bot.onText(
                 const body = JSON.parse(Buffer.concat(chunks).toString());
                 console.log(body); // Выводим ответ API в консоль
 
-                if (body.status === 'ok') {  // вот тут скорее всего статус не тот получает и он идет далье на скачивание и пропускает шаги
+                if (body.status === 'ok') {
+                    // вот тут скорее всего статус не тот получает и он идет далье на скачивание и пропускает шаги
                     const videoUrl = body.data.main_media_hd; // Получаем URL видео
                     const caption = body.data.caption; // Получаем текст под постом
 
@@ -118,4 +119,3 @@ bot.onText(
         req.end();
     }
 );
-
