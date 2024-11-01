@@ -1,122 +1,82 @@
-const TelegramBot = require('node-telegram-bot-api');
-const http = require('https');
-const fs = require('fs');
-const path = require('path');
+import TelegramBot from 'node-telegram-bot-api';
+import fetch from 'node-fetch';
 
-// Укажите ваш токен бота
-const token = '7927813451:AAGxQbdLC9PRahY9EzNSJpYA10ywd6JD2cI'; // Замените на ваш токен
-const bot = new TelegramBot(token, { polling: true });
+// Укажите ваш токен Telegram бота и RapidAPI ключ
+const TELEGRAM_TOKEN = '7595948986:AAEBT4Q6kBoUCb_fPsVxgcl6-ObxUK-bY9g'; // Замените на ваш токен
+const RAPIDAPI_KEY = 'acfd6b6cf4mshf0d04ae3dde86a6p1855e8jsn6a715c2c667d'; // Замените на ваш ключ RapidAPI
 
+// Инициализация бота
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+// Приветственное сообщение
 bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, 'Отправьте ссылку на пост в Instagram.');
+    const chatId = msg.chat.id;
+    bot.sendMessage(chatId, 'Привет! Пришлите ссылку на видео.');
 });
 
-bot.onText(
-    /https:\/\/www\.instagram\.com\/reel\/([a-zA-Z0-9_-]+)/,
-    (msg, match) => {
-        const shortcode = match[1];
-        const apiUrl = `https://instagram-bulk-scraper-latest.p.rapidapi.com/media_download_by_shortcode/${shortcode}`;
+// Обработка полученной ссылки
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
 
-        const options = {
-            method: 'GET',
-            hostname: 'instagram-bulk-scraper-latest.p.rapidapi.com',
-            port: null,
-            path: `/media_download_by_shortcode/${shortcode}`,
-            headers: {
-                'x-rapidapi-key':
-                    'acfd6b6cf4mshf0d04ae3dde86a6p1855e8jsn6a715c2c667d', // Замените на ваш ключ
-                'x-rapidapi-host':
-                    'instagram-bulk-scraper-latest.p.rapidapi.com',
-            },
-        };
+    // Проверяем, есть ли текстовое сообщение
+    if (msg.text && !msg.text.startsWith('/')) {
+        const url = msg.text;
 
-        const req = http.request(options, (res) => {
-            const chunks = [];
-
-            res.on('data', (chunk) => {
-                chunks.push(chunk);
-            });
-
-            res.on('end', () => {
-                const body = JSON.parse(Buffer.concat(chunks).toString());
-                console.log(body); // Выводим ответ API в консоль
-
-                if (body.status === 'ok') {
-                    // вот тут скорее всего статус не тот получает и он идет далье на скачивание и пропускает шаги
-                    const videoUrl = body.data.main_media_hd; // Получаем URL видео
-                    const caption = body.data.caption; // Получаем текст под постом
-
-                    console.log('Ссылка на видео:', videoUrl); // Логируем URL видео
-                    console.log('Текст под постом:', caption); // Логируем текст под постом
-
-                    if (videoUrl) {
-                        const file = fs.createWriteStream(
-                            path.join(__dirname, 'video.mp4')
-                        );
-
-                        http.get(videoUrl, (response) => {
-                            response.pipe(file);
-
-                            file.on('finish', () => {
-                                file.close(() => {
-                                    // Отправляем видео и текст в одном сообщении
-                                    const message = caption
-                                        ? `🎥 *Видео:* [Скачать](${videoUrl})\n\n📝 *Описание:* ${caption}`
-                                        : `🎥 *Видео:* [Скачать](${videoUrl})\n\n📝 *Описание отсутствует.*`;
-
-                                    bot.sendVideo(
-                                        msg.chat.id,
-                                        path.join(__dirname, 'video.mp4'),
-                                        {
-                                            caption: message,
-                                            parse_mode: 'Markdown',
-                                        }
-                                    ).catch((err) => {
-                                        console.error(
-                                            'Ошибка при отправке видео:',
-                                            err.message
-                                        );
-                                        bot.sendMessage(
-                                            msg.chat.id,
-                                            'Произошла ошибка при отправке видео.'
-                                        );
-                                    });
-                                });
-                            });
-                        }).on('error', (err) => {
-                            console.error(
-                                'Ошибка при скачивании видео:',
-                                err.message
-                            );
-                            bot.sendMessage(
-                                msg.chat.id,
-                                'Произошла ошибка при скачивании видео. Убедитесь, что ссылка корректна.'
-                            );
-                        });
-                    } else {
-                        bot.sendMessage(
-                            msg.chat.id,
-                            'Не удалось получить URL видео.'
-                        );
-                    }
-                } else {
-                    bot.sendMessage(
-                        msg.chat.id,
-                        'Произошла ошибка при обработке ссылки. Убедитесь, что ссылка корректна.'
-                    );
+        // Отправляем запрос к API
+        try {
+            const apiResponse = await fetch(
+                'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
+                {
+                    method: 'POST',
+                    headers: {
+                        'x-rapidapi-key': RAPIDAPI_KEY,
+                        'x-rapidapi-host':
+                            'social-download-all-in-one.p.rapidapi.com',
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url }),
                 }
-            });
-        });
-
-        req.on('error', (error) => {
-            console.error('Ошибка при выполнении запроса:', error);
-            bot.sendMessage(
-                msg.chat.id,
-                'Произошла ошибка при обработке ссылки. Убедитесь, что ссылка корректна.'
             );
-        });
 
-        req.end();
+            const result = await apiResponse.json();
+
+            // Проверяем на ошибки и тип контента
+            if (result.error) {
+                bot.sendMessage(
+                    chatId,
+                    'Произошла ошибка при обработке ссылки.'
+                );
+                return;
+            }
+
+            // Если несколько медиа, отправляем все в одном сообщении
+            if (result.type === 'multiple' && result.medias) {
+                const mediaUrls = result.medias.map((media) => media.url);
+                await bot.sendMediaGroup(
+                    chatId,
+                    mediaUrls.map((url) => ({ type: 'photo', media: url }))
+                );
+                await bot.sendMessage(
+                    chatId,
+                    result.title || 'Медиа из социальной сети'
+                );
+            } else if (result.type === 'image' || result.type === 'video') {
+                const mediaType =
+                    result.type === 'video' ? bot.sendVideo : bot.sendPhoto;
+                await mediaType.call(bot, chatId, result.url, {
+                    caption: result.title || 'Медиа из социальной сети',
+                });
+            } else {
+                bot.sendMessage(chatId, 'Неподдерживаемый тип медиа.');
+            }
+        } catch (error) {
+            console.error(error);
+            bot.sendMessage(
+                chatId,
+                'Произошла ошибка при выполнении запроса к API.'
+            );
+        }
     }
-);
-////com
+});
+
+bot.on('polling_error', (error) => console.log(error));
