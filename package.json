@@ -1,18 +1,13 @@
 {
-  "dependencies": {
-    "axios": "^1.7.7",
-    "https": "^1.0.0",
-    "node-telegram-bot-api": "^0.66.0"
-  },
-  "name": "botiinstagram",
-  "version": "1.0.0",
-  "main": "app.js",
-  "devDependencies": {},
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+    "name": "tg-bot",
+    "version": "1.0.0",
+    "main": "app.js",
+    "type": "module",
+    "scripts": {
+        "start": "node app.js"
+    },
+    "dependencies": {
+        "node-fetch": "^3.3.2",
+        "node-telegram-bot-api": "^0.57.0"
+    }
 }
