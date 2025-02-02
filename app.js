@@ -1,9 +1,11 @@
+import dotenv from 'dotenv';
+dotenv.config();
 import TelegramBot from 'node-telegram-bot-api';
 import fetch from 'node-fetch';
 
-const TELEGRAM_TOKEN = '7744884848:AAGhbEV9JYYn4INJHW3nPOulQLph5RmikKo';
-const RAPIDAPI_KEY = 'acfd6b6cf4mshf0d04ae3dde86a6p1855e8jsn6a715c2c667d';
-const CHANNEL_ID = '@botsmmhelp';
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const CHANNEL_ID = process.env.CHANNEL_ID;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
@@ -24,7 +26,7 @@ bot.on('message', async (msg) => {
         ) {
             bot.sendMessage(
                 chatId,
-                'Пожалуйста, подпишитесь на канал @botsmmhelp, чтобы использовать бота.'
+                `Пожалуйста, подпишитесь на канал ${CHANNEL_ID}, чтобы использовать бота.`
             );
             return;
         }
@@ -90,7 +92,7 @@ bot.on('message', async (msg) => {
 
                 // Задержка перед отправкой следующей группы (чтобы избежать лимитов Telegram API)
                 if (i < mediaChunks.length - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, 2000)); // 1 секунда задержки
+                    await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 секунды задержки
                 }
             }
         } catch (error) {
