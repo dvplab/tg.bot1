@@ -2,22 +2,54 @@ import dotenv from 'dotenv';
 dotenv.config();
 import TelegramBot from 'node-telegram-bot-api';
 import fetch from 'node-fetch';
+import mongoose from 'mongoose';
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 
+// Подключение к MongoDB
+mongoose
+    .connect(process.env.MONGO_URI, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+    })
+    .then(() => console.log('MongoDB подключена'))
+    .catch((err) => console.error('Ошибка подключения к MongoDB:', err));
+
+// Определение схемы и модели
+const saveBotSchema = new mongoose.Schema({
+    userId: { type: Number, required: true, unique: true },
+    chatId: { type: Number, required: true },
+});
+const SaveBot = mongoose.model('SaveBot', saveBotSchema);
+
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-bot.onText(/\/start/, (msg) => {
+// Новый обработчик для сохранения в базу
+bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    try {
+        const existingUser = await SaveBot.findOne({ userId });
+        if (!existingUser) {
+            const newUser = new SaveBot({ userId, chatId });
+            await newUser.save();
+            console.log('Новый пользователь сохранён в savebot');
+        } else {
+            console.log('Пользователь уже существует в savebot');
+        }
+    } catch (err) {
+        console.error('Ошибка при сохранении в MongoDB:', err);
+    }
+
     bot.sendMessage(chatId, 'Привет! Пожалуйста, отправьте ссылку на видео.');
 });
 
+// Исходный код бота (без изменений)
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-
-    // Проверка подписки
     try {
         const memberStatus = await bot.getChatMember(CHANNEL_ID, chatId);
         if (
@@ -38,7 +70,6 @@ bot.on('message', async (msg) => {
 
     if (msg.text && !msg.text.startsWith('/')) {
         const url = msg.text;
-
         try {
             const apiResponse = await fetch(
                 'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
@@ -55,7 +86,6 @@ bot.on('message', async (msg) => {
             );
 
             const result = await apiResponse.json();
-
             if (result.error) {
                 bot.sendMessage(
                     chatId,
@@ -64,21 +94,15 @@ bot.on('message', async (msg) => {
                 return;
             }
 
-            // Отправляем описание поста отдельно, если оно есть
-            if (result.title) {
-                await bot.sendMessage(chatId, result.title);
-            }
+            if (result.title) await bot.sendMessage(chatId, result.title);
 
-            // Разделение медиа на группы по 10
             const mediaChunks = [];
             for (let i = 0; i < result.medias.length; i += 10) {
                 mediaChunks.push(result.medias.slice(i, i + 10));
             }
 
-            // Отправляем медиа с задержкой между группами
             for (let i = 0; i < mediaChunks.length; i++) {
                 const chunk = mediaChunks[i];
-
                 const mediaMessages = chunk.map((media, index, array) => ({
                     type: media.type === 'video' ? 'video' : 'photo',
                     media: media.url,
@@ -89,10 +113,8 @@ bot.on('message', async (msg) => {
                 }));
 
                 await bot.sendMediaGroup(chatId, mediaMessages);
-
-                // Задержка перед отправкой следующей группы (чтобы избежать лимитов Telegram API)
                 if (i < mediaChunks.length - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 секунды задержки
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
                 }
             }
         } catch (error) {
