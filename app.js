@@ -23,8 +23,9 @@ if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
 // --- MongoDB ---
 mongoose
     .connect(MONGO_URI, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
+        // Эти опции deprecated в новых драйверах, можно убрать
+        // useNewUrlParser: true,
+        // useUnifiedTopology: true,
     })
     .then(() => console.log('✅ MongoDB подключена'))
     .catch((err) => console.error('❌ Ошибка подключения к MongoDB:', err));
@@ -39,22 +40,34 @@ const SaveBot = mongoose.model('SaveBot', saveBotSchema);
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
 // --- Проверка подписки через Flyer API ---
-async function checkFlyerSubscription(userId) {
+async function checkFlyerSubscription(userId, language_code = 'ru') {
     try {
         const response = await axios.post(
-            'https://api.flyerservice.io/check-subscription',
-            { user_id: userId },
+            'https://api.flyerservice.io/check',
+            {
+                key: FLYER_API_KEY,
+                user_id: userId,
+                language_code,
+                message: {
+                    text: 'Проверка подписки',
+                    button_bot: 'Открыть бота',
+                    button_channel: 'Подписаться',
+                    button_url: 'https://t.me/your_channel', // <- замени на свой канал
+                },
+            },
             {
                 headers: {
-                    Authorization: `Bearer ${FLYER_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
                 httpsAgent: new https.Agent({
                     servername: 'api.flyerservice.io',
+                    // rejectUnauthorized: false, // можно раскомментировать для отладки SSL
                 }),
             }
         );
-        return response.data.subscribed === true;
+
+        const data = response.data;
+        return data.skip === true;
     } catch (error) {
         console.error(
             '❌ Ошибка Flyer API:',
