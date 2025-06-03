@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import https from 'https';
 
 // --- ENV ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -41,13 +42,16 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 async function checkFlyerSubscription(userId) {
     try {
         const response = await axios.post(
-            'https://api.flyer.one/check-subscription',
+            'https://api.flyerservice.io/check-subscription',
             { user_id: userId },
             {
                 headers: {
                     Authorization: `Bearer ${FLYER_API_KEY}`,
                     'Content-Type': 'application/json',
                 },
+                httpsAgent: new https.Agent({
+                    servername: 'api.flyerservice.io',
+                }),
             }
         );
         return response.data.subscribed === true;
