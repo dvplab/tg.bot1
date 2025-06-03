@@ -1,3 +1,5 @@
+// Updated version: replaces subscription check with task-based validation using Flyer API
+
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -9,7 +11,6 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 
-// --- ENV ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const MONGO_URI = process.env.MONGO_URI;
@@ -20,7 +21,6 @@ if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
     process.exit(1);
 }
 
-// --- MongoDB ---
 mongoose
     .connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB подключена'))
@@ -32,65 +32,38 @@ const saveBotSchema = new mongoose.Schema({
 });
 const SaveBot = mongoose.model('SaveBot', saveBotSchema);
 
-// --- Telegram ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// --- Проверка подписки через Flyer API ---
-async function checkFlyerSubscription(userId, languageCode = 'ru') {
+async function hasCompletedFlyerTasks(userId) {
     try {
         const response = await axios.post(
-            'https://api.flyerservice.io/check',
+            'https://api.flyerservice.io/get_completed_tasks',
             {
                 key: FLYER_API_KEY,
                 user_id: userId,
-                language_code: languageCode,
-                message: {
-                    text: '📢 Чтобы использовать бота, подпишитесь на обязательные каналы.',
-                    button_bot: 'Открыть бота',
-                    button_channel: 'Подписаться',
-                    button_url: 'https://t.me/your_channel_here', // Замените на реальную ссылку канала
-                },
             },
-            {
-                headers: { 'Content-Type': 'application/json' },
-                httpsAgent: new https.Agent({
-                    servername: 'api.flyerservice.io',
-                }),
-                timeout: 10000,
-            }
+            { headers: { 'Content-Type': 'application/json' } }
         );
 
         const data = response.data;
-        if (data.skip === true) {
-            return true; // Пользователь подписан
-        } else {
-            console.warn(
-                'Проверка подписки не пройдена:',
-                data.error || data.warning || data.info
-            );
-            return false;
-        }
+        return data?.result?.completed_tasks?.length > 0;
     } catch (error) {
-        console.error(
-            '❌ Ошибка Flyer API:',
-            error.response?.data || error.message
-        );
+        console.error('❌ Ошибка при проверке заданий Flyer:', error);
         return false;
     }
 }
 
-// --- /start команда ---
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
 
     try {
-        const isSubscribed = await checkFlyerSubscription(userId);
+        const hasCompleted = await hasCompletedFlyerTasks(userId);
 
-        if (!isSubscribed) {
+        if (!hasCompleted) {
             return bot.sendMessage(
                 chatId,
-                '📢 Чтобы использовать бота, подпишитесь на обязательные каналы.'
+                '📋 Выполните хотя бы одно задание, чтобы использовать бота.'
             );
         }
 
@@ -98,21 +71,18 @@ bot.onText(/\/start/, async (msg) => {
         if (!existingUser) {
             await new SaveBot({ userId, chatId }).save();
             console.log('👤 Новый пользователь сохранён');
-        } else {
-            console.log('👤 Пользователь уже существует');
         }
 
         await bot.sendMessage(
             chatId,
-            '✅ Вы подписаны. Отправьте ссылку для загрузки медиа.'
+            '✅ Доступ разрешён. Отправьте ссылку для загрузки медиа.'
         );
     } catch (err) {
-        console.error('❌ Ошибка при инициализации:', err);
+        console.error('❌ Ошибка /start:', err);
         await bot.sendMessage(chatId, 'Произошла ошибка при запуске.');
     }
 });
 
-// --- Загрузка медиа ---
 async function downloadMedia(url, filename, retries = 3, timeoutMs = 45000) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -124,8 +94,7 @@ async function downloadMedia(url, filename, retries = 3, timeoutMs = 45000) {
                     accept: 'video/mp4,video/webm,video/*,*/*;q=0.9',
                     referer: 'https://www.instagram.com/',
                     'user-agent':
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-                        '(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
                 },
                 timeout: timeoutMs,
             });
@@ -142,36 +111,31 @@ async function downloadMedia(url, filename, retries = 3, timeoutMs = 45000) {
             return filepath;
         } catch (err) {
             if (attempt === retries) throw err;
-            console.warn(
-                `Попытка ${attempt} не удалась: ${err.message}. Повтор через 2 сек...`
-            );
+            console.warn(`Попытка ${attempt} не удалась: ${err.message}`);
             await new Promise((r) => setTimeout(r, 2000));
         }
     }
 }
 
-// --- Обработка сообщений ---
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
 
     if (msg.text?.startsWith('/')) return;
 
-    const isSubscribed = await checkFlyerSubscription(userId);
-    if (!isSubscribed) {
-        await bot.sendMessage(
+    const hasCompleted = await hasCompletedFlyerTasks(userId);
+    if (!hasCompleted) {
+        return bot.sendMessage(
             chatId,
-            '📢 Для использования бота подпишитесь на обязательные каналы.'
+            '📋 Выполните хотя бы одно задание, чтобы использовать бота.'
         );
-        return;
     }
 
     if (!msg.text || !msg.text.trim().startsWith('http')) {
-        await bot.sendMessage(
+        return bot.sendMessage(
             chatId,
             '📎 Пожалуйста, отправьте ссылку для загрузки медиа.'
         );
-        return;
     }
 
     const url = msg.text.trim();
@@ -189,28 +153,20 @@ bot.on('message', async (msg) => {
             body: JSON.stringify({ url }),
         });
 
-        if (!apiResponse.ok) {
+        if (!apiResponse.ok)
             throw new Error(`API returned status ${apiResponse.status}`);
-        }
 
         const result = await apiResponse.json();
 
-        if (result.error) {
-            await bot.sendMessage(chatId, `Ошибка от API: ${result.error}`);
-            return;
-        }
-
-        if (!Array.isArray(result.medias) || result.medias.length === 0) {
-            await bot.sendMessage(
+        if (result.error)
+            return bot.sendMessage(chatId, `Ошибка от API: ${result.error}`);
+        if (!Array.isArray(result.medias) || result.medias.length === 0)
+            return bot.sendMessage(
                 chatId,
-                'Не удалось получить медиа. Убедитесь, что ссылка верна.'
+                'Медиа не найдено. Проверьте ссылку.'
             );
-            return;
-        }
 
-        if (result.title) {
-            await bot.sendMessage(chatId, result.title);
-        }
+        if (result.title) await bot.sendMessage(chatId, result.title);
 
         const mediaChunks = [];
         for (let i = 0; i < result.medias.length; i += 10) {
@@ -222,7 +178,7 @@ bot.on('message', async (msg) => {
 
             for (let i = 0; i < chunk.length; i++) {
                 const media = chunk[i];
-                let ext =
+                const ext =
                     media.type === 'video'
                         ? 'mp4'
                         : media.type === 'audio'
@@ -253,12 +209,7 @@ bot.on('message', async (msg) => {
             if (mediaGroup.length > 0) {
                 await bot.sendMediaGroup(chatId, mediaGroup);
                 for (const media of mediaGroup) {
-                    if (media.filepath) {
-                        fs.unlink(media.filepath, (err) => {
-                            if (err)
-                                console.error('Ошибка удаления файла:', err);
-                        });
-                    }
+                    if (media.filepath) fs.unlink(media.filepath, () => {});
                 }
             }
 
@@ -272,5 +223,4 @@ bot.on('message', async (msg) => {
     }
 });
 
-// --- Ошибка Polling ---
 bot.on('polling_error', (error) => console.error('Polling error:', error));
