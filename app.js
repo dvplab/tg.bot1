@@ -22,11 +22,7 @@ if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
 
 // --- MongoDB ---
 mongoose
-    .connect(MONGO_URI, {
-        // Эти опции deprecated в новых драйверах, можно убрать
-        // useNewUrlParser: true,
-        // useUnifiedTopology: true,
-    })
+    .connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB подключена'))
     .catch((err) => console.error('❌ Ошибка подключения к MongoDB:', err));
 
@@ -40,34 +36,40 @@ const SaveBot = mongoose.model('SaveBot', saveBotSchema);
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
 // --- Проверка подписки через Flyer API ---
-async function checkFlyerSubscription(userId, language_code = 'ru') {
+async function checkFlyerSubscription(userId, languageCode = 'ru') {
     try {
         const response = await axios.post(
             'https://api.flyerservice.io/check',
             {
                 key: FLYER_API_KEY,
                 user_id: userId,
-                language_code,
+                language_code: languageCode,
                 message: {
-                    text: 'Проверка подписки',
+                    text: '📢 Чтобы использовать бота, подпишитесь на обязательные каналы.',
                     button_bot: 'Открыть бота',
                     button_channel: 'Подписаться',
-                    button_url: 'https://t.me/your_channel', // <- замени на свой канал
+                    button_url: 'https://t.me/your_channel_here', // Замените на реальную ссылку канала
                 },
             },
             {
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 httpsAgent: new https.Agent({
                     servername: 'api.flyerservice.io',
-                    // rejectUnauthorized: false, // можно раскомментировать для отладки SSL
                 }),
+                timeout: 10000,
             }
         );
 
         const data = response.data;
-        return data.skip === true;
+        if (data.skip === true) {
+            return true; // Пользователь подписан
+        } else {
+            console.warn(
+                'Проверка подписки не пройдена:',
+                data.error || data.warning || data.info
+            );
+            return false;
+        }
     } catch (error) {
         console.error(
             '❌ Ошибка Flyer API:',
@@ -84,6 +86,7 @@ bot.onText(/\/start/, async (msg) => {
 
     try {
         const isSubscribed = await checkFlyerSubscription(userId);
+
         if (!isSubscribed) {
             return bot.sendMessage(
                 chatId,
