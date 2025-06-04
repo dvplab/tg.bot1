@@ -1,5 +1,3 @@
-// Updated version: replaces subscription check with task-based validation using Flyer API
-
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -9,7 +7,6 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import https from 'https';
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
@@ -34,19 +31,51 @@ const SaveBot = mongoose.model('SaveBot', saveBotSchema);
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-async function hasCompletedFlyerTasks(userId) {
+// Проверка и отображение заданий
+async function checkFlyerTasks(userId, chatId) {
     try {
-        const response = await axios.post(
-            'https://api.flyerservice.io/get_completed_tasks',
+        const taskResponse = await axios.post(
+            'https://api.flyerservice.io/get_tasks',
             {
                 key: FLYER_API_KEY,
                 user_id: userId,
+                language_code: 'ru',
+                limit: 10,
             },
             { headers: { 'Content-Type': 'application/json' } }
         );
 
-        const data = response.data;
-        return data?.result?.completed_tasks?.length > 0;
+        const tasks = taskResponse.data.result || [];
+
+        if (tasks.length === 0) return true;
+
+        let allComplete = true;
+
+        for (const task of tasks) {
+            const checkResponse = await axios.post(
+                'https://api.flyerservice.io/check_task',
+                {
+                    key: FLYER_API_KEY,
+                    user_id: userId,
+                    signature: task.signature,
+                },
+                { headers: { 'Content-Type': 'application/json' } }
+            );
+
+            const status = checkResponse.data.result;
+            if (status !== 'complete' && status !== 'waiting') {
+                allComplete = false;
+
+                await bot.sendMessage(
+                    chatId,
+                    `📌 Задание: ${task.task}\n💰 Оплата: ${task.price}₽\n📎 ${
+                        task.links[0] || 'Нет ссылки'
+                    }`
+                );
+            }
+        }
+
+        return allComplete;
     } catch (error) {
         console.error('❌ Ошибка при проверке заданий Flyer:', error);
         return false;
@@ -58,12 +87,12 @@ bot.onText(/\/start/, async (msg) => {
     const userId = msg.from?.id;
 
     try {
-        const hasCompleted = await hasCompletedFlyerTasks(userId);
+        const passed = await checkFlyerTasks(userId, chatId);
 
-        if (!hasCompleted) {
+        if (!passed) {
             return bot.sendMessage(
                 chatId,
-                '📋 Выполните хотя бы одно задание, чтобы использовать бота.'
+                '📋 Выполните все задания выше, чтобы использовать бота.'
             );
         }
 
@@ -123,11 +152,11 @@ bot.on('message', async (msg) => {
 
     if (msg.text?.startsWith('/')) return;
 
-    const hasCompleted = await hasCompletedFlyerTasks(userId);
-    if (!hasCompleted) {
+    const passed = await checkFlyerTasks(userId, chatId);
+    if (!passed) {
         return bot.sendMessage(
             chatId,
-            '📋 Выполните хотя бы одно задание, чтобы использовать бота.'
+            '📋 Сначала выполните все задания, чтобы использовать бота.'
         );
     }
 
@@ -154,7 +183,7 @@ bot.on('message', async (msg) => {
         });
 
         if (!apiResponse.ok)
-            throw new Error(`API returned status ${apiResponse.status}`);
+            throw new Error(`API вернул статус ${apiResponse.status}`);
 
         const result = await apiResponse.json();
 
