@@ -8,187 +8,129 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const MONGO_URI = process.env.MONGO_URI;
-const FLYER_API_KEY = process.env.FLYER_API_KEY;
-
+// --- Конфиг ---
+const { TELEGRAM_TOKEN, RAPIDAPI_KEY, MONGO_URI, FLYER_API_KEY } = process.env;
 if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
-    console.error('❌ Проверь переменные окружения');
+    console.error('❌ Проверьте, что все переменные окружения заданы');
     process.exit(1);
 }
 
-mongoose.connect(MONGO_URI).then(() => console.log('✅ MongoDB подключена'));
+// --- MongoDB ---
+mongoose
+    .connect(MONGO_URI)
+    .then(() => console.log('✅ MongoDB подключена'))
+    .catch((err) => console.error('❌ Ошибка MongoDB:', err));
 
-const SaveBot = mongoose.model(
-    'SaveBot',
+const User = mongoose.model(
+    'User',
     new mongoose.Schema({
         userId: { type: Number, required: true, unique: true },
         chatId: { type: Number, required: true },
     })
 );
 
+// --- Телеграм-бот ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-const userTasks = new Map(); // Временное хранилище заданий
 
-function createLinkButtons(links) {
-    const buttons = [];
-    for (let i = 0; i < links.length; i += 2) {
-        const row = links.slice(i, i + 2).map((link) => ({
-            text: '🔗 Перейти',
-            url: link,
-        }));
-        buttons.push(row);
-    }
-    return buttons;
-}
+// Умная ссылка на мини-апп
+const MINI_APP_LINK = 'https://t.me/FlyWebTasksBot/app?startapp=3HkVHT';
 
+// Загрузчик медиа (остался без изменений)
 async function downloadMedia(url, filename) {
-    const response = await axios.get(url, {
+    const resp = await axios.get(url, {
         responseType: 'stream',
         timeout: 30000,
-        headers: {
-            referer: 'https://www.instagram.com/',
-            'user-agent': 'Mozilla/5.0',
-        },
     });
-    const filepath = path.join(os.tmpdir(), filename);
-    const writer = fs.createWriteStream(filepath);
-    response.data.pipe(writer);
+    const file = path.join(os.tmpdir(), filename);
+    const w = fs.createWriteStream(file);
+    resp.data.pipe(w);
     return new Promise((res, rej) => {
-        writer.on('finish', () => res(filepath));
-        writer.on('error', rej);
+        w.on('finish', () => res(file));
+        w.on('error', rej);
     });
 }
 
-// Старт — получаем задания
+// --- /start: проверяем get_completed_tasks ---
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    const userId = msg.from?.id;
-    if (!userId) return;
+    const userId = msg.from.id;
 
     try {
-        const response = await axios.post(
-            'https://api.flyerservice.io/get_tasks',
-            {
-                key: FLYER_API_KEY,
-                user_id: userId,
-                language_code: 'ru',
-                limit: 10,
-            }
+        // Запрос списка выполненных заданий
+        const { data } = await axios.post(
+            'https://api.flyerservice.io/get_completed_tasks',
+            { key: FLYER_API_KEY, user_id: userId },
+            { headers: { 'Content-Type': 'application/json' } }
         );
-        console.log('get_tasks response:', response.data);
 
-        const tasks = response.data.result;
-        if (!tasks || tasks.length === 0) {
-            return bot.sendMessage(chatId, '📭 Нет заданий для выполнения.');
-        }
-
-        userTasks.set(userId, tasks);
-        for (const task of tasks) {
-            const links = task.links || [];
-            const keyboard = createLinkButtons(links);
-            await bot.sendMessage(
+        // Если API вернул ошибку/врапнинг
+        if (data.error) {
+            console.warn('Flyer get_completed_tasks error:', data.error);
+            return bot.sendMessage(
                 chatId,
-                `📌 Задание: ${task.task}\n💰 Оплата: ${task.price}₽`,
-                { reply_markup: { inline_keyboard: keyboard } }
+                `❌ Ошибка при проверке заданий: ${data.error}`
             );
         }
 
-        await bot.sendMessage(
-            chatId,
-            'Когда выполните все задания, нажмите "✅ Продолжить"',
-            {
-                reply_markup: {
-                    inline_keyboard: [
-                        [
-                            {
-                                text: '✅ Продолжить',
-                                callback_data: 'check_tasks',
-                            },
-                        ],
-                    ],
-                },
+        const completedCount = (data.result.completed_tasks || []).length;
+        const totalCount = data.result.count_all_tasks || 0;
+
+        // Если всё выполнено — сохраняем и открываем доступ
+        if (totalCount > 0 && completedCount === totalCount) {
+            if (!(await User.findOne({ userId }))) {
+                await new User({ userId, chatId }).save();
             }
+            return bot.sendMessage(
+                chatId,
+                '✅ Вы прошли задания! Теперь отправьте ссылку для загрузки медиа.'
+            );
+        }
+
+        // Иначе — заново шлём ссылку на мини-апп
+        return bot.sendMessage(
+            chatId,
+            `📋 Чтобы получить доступ, сначала выполните задания в мини-апп:\n${MINI_APP_LINK}\n\n` +
+                `После завершения — снова нажмите /start.`
         );
     } catch (err) {
         console.error(
-            'Ошибка получения заданий:',
+            'Ошибка get_completed_tasks:',
             err.response?.data || err.message
         );
-        bot.sendMessage(chatId, '❌ Ошибка получения заданий.');
-    }
-});
-
-// Обработка "✅ Продолжить"
-bot.on('callback_query', async (query) => {
-    const userId = query.from.id;
-    const chatId = query.message?.chat.id;
-    if (!chatId || !userTasks.has(userId)) return;
-
-    if (query.data === 'check_tasks') {
-        const tasks = userTasks.get(userId);
-        let completed = 0;
-
-        for (const task of tasks) {
-            try {
-                const check = await axios.post(
-                    'https://api.flyerservice.io/check_task',
-                    {
-                        key: FLYER_API_KEY,
-                        user_id: userId,
-                        signature: task.signature,
-                    }
-                );
-                if (['complete', 'waiting'].includes(check.data.result)) {
-                    completed++;
-                }
-            } catch (err) {
-                console.error(
-                    'Ошибка проверки задания:',
-                    err.response?.data || err.message
-                );
-            }
-        }
-
-        if (completed === tasks.length) {
-            if (!(await SaveBot.findOne({ userId }))) {
-                await new SaveBot({ userId, chatId }).save();
-            }
-            await bot.sendMessage(
-                chatId,
-                '✅ Доступ открыт. Отправьте ссылку для загрузки медиа.'
-            );
-        } else {
-            await bot.sendMessage(
-                chatId,
-                `🕒 Выполнено: ${completed} из ${tasks.length} заданий.\nПожалуйста, завершите все задания и нажмите "Продолжить" снова.`
-            );
-        }
-    }
-});
-
-// Обработка ссылок на медиа
-bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from?.id;
-    const text = msg.text?.trim();
-    if (!text || text.startsWith('/')) return;
-
-    const user = await SaveBot.findOne({ userId });
-    if (!user) {
-        return bot.sendMessage(
+        bot.sendMessage(
             chatId,
-            '🔒 Сначала выполните задания и нажмите /start.'
+            '❌ Не удалось проверить выполнение заданий. Попробуйте позже.'
         );
     }
+});
+
+// --- Обработка любого другого сообщения: загрузка медиа ---
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const text = msg.text?.trim();
+
+    // игнорируем команды и пустые
+    if (!text || text.startsWith('/')) return;
+
+    // проверяем, прошёл ли пользователь через задания
+    if (!(await User.findOne({ userId }))) {
+        return bot.sendMessage(
+            chatId,
+            `🔒 У вас нет доступа — сначала выполните задания:\n${MINI_APP_LINK}\n\n` +
+                `Затем нажмите /start.`
+        );
+    }
+
+    // проверяем формат ссылки
     if (!/^https?:\/\//i.test(text)) {
         return bot.sendMessage(
             chatId,
-            '📎 Пожалуйста, отправьте ссылку для загрузки.'
+            '📎 Пожалуйста, отправьте корректную ссылку.'
         );
     }
 
+    // делаем запрос к скачивателю
     try {
         const res = await fetch(
             'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
@@ -205,27 +147,25 @@ bot.on('message', async (msg) => {
         );
         const result = await res.json();
 
-        if (!Array.isArray(result.medias) || !result.medias.length) {
+        if (!Array.isArray(result.medias) || result.medias.length === 0) {
             return bot.sendMessage(chatId, '❌ Медиа не найдено.');
         }
 
         const mediaGroup = [];
         for (let i = 0; i < result.medias.length && i < 10; i++) {
-            const media = result.medias[i];
-            const ext = media.type === 'video' ? 'mp4' : 'jpg';
-            const filename = `media_${Date.now()}_${i}.${ext}`;
-            const filePath = await downloadMedia(media.url, filename);
-
+            const m = result.medias[i];
+            const ext = m.type === 'video' ? 'mp4' : 'jpg';
+            const fn = `media_${Date.now()}_${i}.${ext}`;
+            const filePath = await downloadMedia(m.url, fn);
             mediaGroup.push({
-                type: media.type === 'video' ? 'video' : 'photo',
+                type: m.type === 'video' ? 'video' : 'photo',
                 media: fs.createReadStream(filePath),
-                caption: i === 0 ? '📥 Скачано через бота' : undefined,
             });
         }
 
         await bot.sendMediaGroup(chatId, mediaGroup);
     } catch (err) {
-        console.error('Ошибка загрузки медиа:', err);
+        console.error('Ошибка при скачивании медиа:', err);
         bot.sendMessage(chatId, '❌ Ошибка при загрузке медиа.');
     }
 });
