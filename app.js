@@ -14,242 +14,230 @@ const MONGO_URI = process.env.MONGO_URI;
 const FLYER_API_KEY = process.env.FLYER_API_KEY;
 
 if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
-    console.error('❌ Проверьте, что все переменные окружения заданы');
+    console.error('❌ Проверь переменные окружения');
     process.exit(1);
 }
 
-mongoose
-    .connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB подключена'))
-    .catch((err) => console.error('❌ Ошибка подключения к MongoDB:', err));
+mongoose.connect(MONGO_URI).then(() => console.log('✅ MongoDB подключена'));
 
-const saveBotSchema = new mongoose.Schema({
-    userId: { type: Number, required: true, unique: true },
-    chatId: { type: Number, required: true },
-});
-const SaveBot = mongoose.model('SaveBot', saveBotSchema);
+const SaveBot = mongoose.model(
+    'SaveBot',
+    new mongoose.Schema({
+        userId: { type: Number, required: true, unique: true },
+        chatId: { type: Number, required: true },
+    })
+);
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// Проверка и отображение заданий
-async function checkFlyerTasks(userId, chatId) {
+// Убираем типы, это теперь просто Map
+const userTasks = new Map(); // Временное хранилище заданий
+
+function createLinkButtons(links) {
+    const buttons = [];
+    for (let i = 0; i < links.length; i += 2) {
+        const row = links.slice(i, i + 2).map((link) => ({
+            text: '🔗 Перейти',
+            url: link,
+        }));
+        buttons.push(row);
+    }
+    return buttons;
+}
+
+async function downloadMedia(url, filename) {
+    const response = await axios.get(url, {
+        responseType: 'stream',
+        timeout: 30000,
+        headers: {
+            referer: 'https://www.instagram.com/',
+            'user-agent': 'Mozilla/5.0',
+        },
+    });
+
+    const filepath = path.join(os.tmpdir(), filename);
+    const writer = fs.createWriteStream(filepath);
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+        writer.on('finish', () => resolve(filepath));
+        writer.on('error', reject);
+    });
+}
+
+// Старт — получаем задания
+bot.onText(/\/start/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id;
+    if (!userId) return;
+
     try {
-        const taskResponse = await axios.post(
+        const response = await axios.post(
             'https://api.flyerservice.io/get_tasks',
             {
                 key: FLYER_API_KEY,
                 user_id: userId,
-                language_code: 'ru',
-                limit: 10,
-            },
-            { headers: { 'Content-Type': 'application/json' } }
+            }
         );
 
-        const tasks = taskResponse.data.result || [];
+        const tasks = response.data.result;
+        if (!tasks || tasks.length === 0) {
+            return bot.sendMessage(chatId, '📭 Нет заданий для выполнения.');
+        }
 
-        if (tasks.length === 0) return true;
-
-        let allComplete = true;
+        userTasks.set(userId, tasks);
 
         for (const task of tasks) {
-            const checkResponse = await axios.post(
-                'https://api.flyerservice.io/check_task',
-                {
-                    key: FLYER_API_KEY,
-                    user_id: userId,
-                    signature: task.signature,
-                },
-                { headers: { 'Content-Type': 'application/json' } }
-            );
+            const links = task.links || [];
+            const keyboard = createLinkButtons(links);
 
-            const status = checkResponse.data.result;
-            if (status !== 'complete' && status !== 'waiting') {
-                allComplete = false;
-
-                await bot.sendMessage(
-                    chatId,
-                    `📌 Задание: ${task.task}\n💰 Оплата: ${task.price}₽\n📎 ${
-                        task.links[0] || 'Нет ссылки'
-                    }`
-                );
-            }
-        }
-
-        return allComplete;
-    } catch (error) {
-        console.error('❌ Ошибка при проверке заданий Flyer:', error);
-        return false;
-    }
-}
-
-bot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from?.id;
-
-    try {
-        const passed = await checkFlyerTasks(userId, chatId);
-
-        if (!passed) {
-            return bot.sendMessage(
+            await bot.sendMessage(
                 chatId,
-                '📋 Выполните все задания выше, чтобы использовать бота.'
+                `📌 Задание: ${task.task}\n💰 Оплата: ${task.price}₽`,
+                {
+                    reply_markup: {
+                        inline_keyboard: keyboard,
+                    },
+                }
             );
-        }
-
-        const existingUser = await SaveBot.findOne({ userId });
-        if (!existingUser) {
-            await new SaveBot({ userId, chatId }).save();
-            console.log('👤 Новый пользователь сохранён');
         }
 
         await bot.sendMessage(
             chatId,
-            '✅ Доступ разрешён. Отправьте ссылку для загрузки медиа.'
+            'Когда выполните все задания, нажмите "✅ Продолжить"',
+            {
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            {
+                                text: '✅ Продолжить',
+                                callback_data: 'check_tasks',
+                            },
+                        ],
+                    ],
+                },
+            }
         );
     } catch (err) {
-        console.error('❌ Ошибка /start:', err);
-        await bot.sendMessage(chatId, 'Произошла ошибка при запуске.');
+        console.error('Ошибка получения заданий:', err);
+        bot.sendMessage(chatId, '❌ Ошибка получения заданий.');
     }
 });
 
-async function downloadMedia(url, filename, retries = 3, timeoutMs = 45000) {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-        try {
-            const response = await axios({
-                method: 'GET',
-                url,
-                responseType: 'stream',
-                headers: {
-                    accept: 'video/mp4,video/webm,video/*,*/*;q=0.9',
-                    referer: 'https://www.instagram.com/',
-                    'user-agent':
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
-                },
-                timeout: timeoutMs,
-            });
+// Обработка "✅ Продолжить"
+bot.on('callback_query', async (query) => {
+    const userId = query.from.id;
+    const chatId = query.message?.chat.id;
+    const data = query.data;
 
-            const filepath = path.join(os.tmpdir(), filename);
-            const writer = fs.createWriteStream(filepath);
-            response.data.pipe(writer);
+    if (!chatId || !data || !userTasks.has(userId)) return;
 
-            await new Promise((resolve, reject) => {
-                writer.on('finish', resolve);
-                writer.on('error', reject);
-            });
+    if (data === 'check_tasks') {
+        const tasks = userTasks.get(userId);
+        let completed = 0;
 
-            return filepath;
-        } catch (err) {
-            if (attempt === retries) throw err;
-            console.warn(`Попытка ${attempt} не удалась: ${err.message}`);
-            await new Promise((r) => setTimeout(r, 2000));
+        for (const task of tasks) {
+            try {
+                const check = await axios.post(
+                    'https://api.flyerservice.io/check_task',
+                    {
+                        key: FLYER_API_KEY,
+                        user_id: userId,
+                        signature: task.signature,
+                    }
+                );
+
+                const result = check.data.result;
+                if (result === 'complete' || result === 'waiting') {
+                    completed++;
+                }
+            } catch (err) {
+                console.error('Ошибка проверки задания:', err);
+            }
+        }
+
+        if (completed === tasks.length) {
+            if (!(await SaveBot.findOne({ userId }))) {
+                await new SaveBot({ userId, chatId }).save();
+            }
+
+            await bot.sendMessage(
+                chatId,
+                '✅ Доступ открыт. Отправьте ссылку для загрузки медиа.'
+            );
+        } else {
+            await bot.sendMessage(
+                chatId,
+                `🕒 Выполнено: ${completed} из ${tasks.length} заданий.\nПожалуйста, завершите все задания и нажмите "Продолжить" снова.`
+            );
         }
     }
-}
+});
 
+// Обработка ссылок на медиа
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
+    const text = msg.text?.trim();
 
-    if (msg.text?.startsWith('/')) return;
+    if (!text || text.startsWith('/')) return;
 
-    const passed = await checkFlyerTasks(userId, chatId);
-    if (!passed) {
+    const user = await SaveBot.findOne({ userId });
+    if (!user) {
         return bot.sendMessage(
             chatId,
-            '📋 Сначала выполните все задания, чтобы использовать бота.'
+            '🔒 Сначала выполните задания и нажмите /start.'
         );
     }
 
-    if (!msg.text || !msg.text.trim().startsWith('http')) {
+    if (!/^https?:\/\//i.test(text)) {
         return bot.sendMessage(
             chatId,
-            '📎 Пожалуйста, отправьте ссылку для загрузки медиа.'
+            '📎 Пожалуйста, отправьте ссылку для загрузки.'
         );
     }
-
-    const url = msg.text.trim();
 
     try {
-        const apiUrl =
-            'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink';
-        const apiResponse = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                'x-rapidapi-key': RAPIDAPI_KEY,
-                'x-rapidapi-host': 'social-download-all-in-one.p.rapidapi.com',
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ url }),
-        });
+        const res = await fetch(
+            'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-rapidapi-key': RAPIDAPI_KEY,
+                    'x-rapidapi-host':
+                        'social-download-all-in-one.p.rapidapi.com',
+                },
+                body: JSON.stringify({ url: text }),
+            }
+        );
 
-        if (!apiResponse.ok)
-            throw new Error(`API вернул статус ${apiResponse.status}`);
+        const result = await res.json();
 
-        const result = await apiResponse.json();
-
-        if (result.error)
-            return bot.sendMessage(chatId, `Ошибка от API: ${result.error}`);
-        if (!Array.isArray(result.medias) || result.medias.length === 0)
-            return bot.sendMessage(
-                chatId,
-                'Медиа не найдено. Проверьте ссылку.'
-            );
-
-        if (result.title) await bot.sendMessage(chatId, result.title);
-
-        const mediaChunks = [];
-        for (let i = 0; i < result.medias.length; i += 10) {
-            mediaChunks.push(result.medias.slice(i, i + 10));
+        if (!Array.isArray(result.medias) || result.medias.length === 0) {
+            return bot.sendMessage(chatId, '❌ Медиа не найдено.');
         }
 
-        for (const chunk of mediaChunks) {
-            const mediaGroup = [];
+        const mediaGroup = [];
 
-            for (let i = 0; i < chunk.length; i++) {
-                const media = chunk[i];
-                const ext =
-                    media.type === 'video'
-                        ? 'mp4'
-                        : media.type === 'audio'
-                        ? 'mp3'
-                        : 'jpg';
-                const filename = `media_${Date.now()}_${i}.${ext}`;
+        for (let i = 0; i < result.medias.length && i < 10; i++) {
+            const media = result.medias[i];
+            const ext = media.type === 'video' ? 'mp4' : 'jpg';
+            const filename = `media_${Date.now()}_${i}.${ext}`;
+            const filePath = await downloadMedia(media.url, filename);
 
-                try {
-                    const filepath = await downloadMedia(media.url, filename);
-                    mediaGroup.push({
-                        type: media.type === 'video' ? 'video' : 'photo',
-                        media: fs.createReadStream(filepath),
-                        caption:
-                            i === chunk.length - 1
-                                ? 'Скачано через @DownloadVideoAllBot'
-                                : undefined,
-                        filepath,
-                    });
-                } catch (err) {
-                    console.error('❌ Ошибка при скачивании:', err);
-                    await bot.sendMessage(
-                        chatId,
-                        `Не удалось скачать файл: ${media.url}`
-                    );
-                }
-            }
-
-            if (mediaGroup.length > 0) {
-                await bot.sendMediaGroup(chatId, mediaGroup);
-                for (const media of mediaGroup) {
-                    if (media.filepath) fs.unlink(media.filepath, () => {});
-                }
-            }
-
-            if (chunk !== mediaChunks[mediaChunks.length - 1]) {
-                await new Promise((r) => setTimeout(r, 2000));
-            }
+            mediaGroup.push({
+                type: media.type === 'video' ? 'video' : 'photo',
+                media: fs.createReadStream(filePath),
+                caption: i === 0 ? '📥 Скачано через бота' : undefined,
+            });
         }
-    } catch (error) {
-        console.error('❌ Ошибка API:', error);
-        await bot.sendMessage(chatId, 'Произошла ошибка при запросе к API.');
+
+        await bot.sendMediaGroup(chatId, mediaGroup);
+    } catch (err) {
+        console.error('Ошибка загрузки медиа:', err);
+        bot.sendMessage(chatId, '❌ Ошибка при загрузке медиа.');
     }
 });
 
-bot.on('polling_error', (error) => console.error('Polling error:', error));
+bot.on('polling_error', console.error);
