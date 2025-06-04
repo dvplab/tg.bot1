@@ -29,8 +29,6 @@ const SaveBot = mongoose.model(
 );
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-
-// Убираем типы, это теперь просто Map
 const userTasks = new Map(); // Временное хранилище заданий
 
 function createLinkButtons(links) {
@@ -54,14 +52,12 @@ async function downloadMedia(url, filename) {
             'user-agent': 'Mozilla/5.0',
         },
     });
-
     const filepath = path.join(os.tmpdir(), filename);
     const writer = fs.createWriteStream(filepath);
     response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-        writer.on('finish', () => resolve(filepath));
-        writer.on('error', reject);
+    return new Promise((res, rej) => {
+        writer.on('finish', () => res(filepath));
+        writer.on('error', rej);
     });
 }
 
@@ -77,8 +73,11 @@ bot.onText(/\/start/, async (msg) => {
             {
                 key: FLYER_API_KEY,
                 user_id: userId,
+                language_code: 'ru',
+                limit: 10,
             }
         );
+        console.log('get_tasks response:', response.data);
 
         const tasks = response.data.result;
         if (!tasks || tasks.length === 0) {
@@ -86,19 +85,13 @@ bot.onText(/\/start/, async (msg) => {
         }
 
         userTasks.set(userId, tasks);
-
         for (const task of tasks) {
             const links = task.links || [];
             const keyboard = createLinkButtons(links);
-
             await bot.sendMessage(
                 chatId,
                 `📌 Задание: ${task.task}\n💰 Оплата: ${task.price}₽`,
-                {
-                    reply_markup: {
-                        inline_keyboard: keyboard,
-                    },
-                }
+                { reply_markup: { inline_keyboard: keyboard } }
             );
         }
 
@@ -119,7 +112,10 @@ bot.onText(/\/start/, async (msg) => {
             }
         );
     } catch (err) {
-        console.error('Ошибка получения заданий:', err);
+        console.error(
+            'Ошибка получения заданий:',
+            err.response?.data || err.message
+        );
         bot.sendMessage(chatId, '❌ Ошибка получения заданий.');
     }
 });
@@ -128,11 +124,9 @@ bot.onText(/\/start/, async (msg) => {
 bot.on('callback_query', async (query) => {
     const userId = query.from.id;
     const chatId = query.message?.chat.id;
-    const data = query.data;
+    if (!chatId || !userTasks.has(userId)) return;
 
-    if (!chatId || !data || !userTasks.has(userId)) return;
-
-    if (data === 'check_tasks') {
+    if (query.data === 'check_tasks') {
         const tasks = userTasks.get(userId);
         let completed = 0;
 
@@ -146,13 +140,14 @@ bot.on('callback_query', async (query) => {
                         signature: task.signature,
                     }
                 );
-
-                const result = check.data.result;
-                if (result === 'complete' || result === 'waiting') {
+                if (['complete', 'waiting'].includes(check.data.result)) {
                     completed++;
                 }
             } catch (err) {
-                console.error('Ошибка проверки задания:', err);
+                console.error(
+                    'Ошибка проверки задания:',
+                    err.response?.data || err.message
+                );
             }
         }
 
@@ -160,7 +155,6 @@ bot.on('callback_query', async (query) => {
             if (!(await SaveBot.findOne({ userId }))) {
                 await new SaveBot({ userId, chatId }).save();
             }
-
             await bot.sendMessage(
                 chatId,
                 '✅ Доступ открыт. Отправьте ссылку для загрузки медиа.'
@@ -179,7 +173,6 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     const text = msg.text?.trim();
-
     if (!text || text.startsWith('/')) return;
 
     const user = await SaveBot.findOne({ userId });
@@ -189,7 +182,6 @@ bot.on('message', async (msg) => {
             '🔒 Сначала выполните задания и нажмите /start.'
         );
     }
-
     if (!/^https?:\/\//i.test(text)) {
         return bot.sendMessage(
             chatId,
@@ -211,15 +203,13 @@ bot.on('message', async (msg) => {
                 body: JSON.stringify({ url: text }),
             }
         );
-
         const result = await res.json();
 
-        if (!Array.isArray(result.medias) || result.medias.length === 0) {
+        if (!Array.isArray(result.medias) || !result.medias.length) {
             return bot.sendMessage(chatId, '❌ Медиа не найдено.');
         }
 
         const mediaGroup = [];
-
         for (let i = 0; i < result.medias.length && i < 10; i++) {
             const media = result.medias[i];
             const ext = media.type === 'video' ? 'mp4' : 'jpg';
