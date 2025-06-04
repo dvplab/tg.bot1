@@ -35,7 +35,7 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 // Умная ссылка на мини-апп
 const MINI_APP_LINK = 'https://t.me/FlyWebTasksBot/app?startapp=3HkVHT';
 
-// Загрузчик медиа (остался без изменений)
+// Функция для загрузки медиа
 async function downloadMedia(url, filename) {
     const resp = await axios.get(url, {
         responseType: 'stream',
@@ -50,32 +50,32 @@ async function downloadMedia(url, filename) {
     });
 }
 
-// --- /start: проверяем get_completed_tasks ---
+// --- /start: проверяем get_completed_tasks, но при ошибке даём доступ ---
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
     try {
-        // Запрос списка выполненных заданий
         const { data } = await axios.post(
             'https://api.flyerservice.io/get_completed_tasks',
             { key: FLYER_API_KEY, user_id: userId },
             { headers: { 'Content-Type': 'application/json' } }
         );
 
-        // Если API вернул ошибку/врапнинг
         if (data.error) {
             console.warn('Flyer get_completed_tasks error:', data.error);
+            if (!(await User.findOne({ userId }))) {
+                await new User({ userId, chatId }).save();
+            }
             return bot.sendMessage(
                 chatId,
-                `❌ Ошибка при проверке заданий: ${data.error}`
+                '✅ (Ошибка проверки заданий) Доступ открыт. Отправьте ссылку для загрузки медиа.'
             );
         }
 
         const completedCount = (data.result.completed_tasks || []).length;
         const totalCount = data.result.count_all_tasks || 0;
 
-        // Если всё выполнено — сохраняем и открываем доступ
         if (totalCount > 0 && completedCount === totalCount) {
             if (!(await User.findOne({ userId }))) {
                 await new User({ userId, chatId }).save();
@@ -86,20 +86,25 @@ bot.onText(/\/start/, async (msg) => {
             );
         }
 
-        // Иначе — заново шлём ссылку на мини-апп
+        // Если заданий нет или они не все выполнены — также даём доступ
+        if (!(await User.findOne({ userId }))) {
+            await new User({ userId, chatId }).save();
+        }
         return bot.sendMessage(
             chatId,
-            `📋 Чтобы получить доступ, сначала выполните задания в мини-апп:\n${MINI_APP_LINK}\n\n` +
-                `После завершения — снова нажмите /start.`
+            '✅ Доступ открыт. Отправьте ссылку для загрузки медиа.'
         );
     } catch (err) {
         console.error(
             'Ошибка get_completed_tasks:',
             err.response?.data || err.message
         );
-        bot.sendMessage(
+        if (!(await User.findOne({ userId }))) {
+            await new User({ userId, chatId }).save();
+        }
+        return bot.sendMessage(
             chatId,
-            '❌ Не удалось проверить выполнение заданий. Попробуйте позже.'
+            '✅ (Ошибка сервиса) Доступ открыт. Отправьте ссылку для загрузки медиа.'
         );
     }
 });
@@ -110,10 +115,8 @@ bot.on('message', async (msg) => {
     const userId = msg.from.id;
     const text = msg.text?.trim();
 
-    // игнорируем команды и пустые
     if (!text || text.startsWith('/')) return;
 
-    // проверяем, прошёл ли пользователь через задания
     if (!(await User.findOne({ userId }))) {
         return bot.sendMessage(
             chatId,
@@ -122,7 +125,6 @@ bot.on('message', async (msg) => {
         );
     }
 
-    // проверяем формат ссылки
     if (!/^https?:\/\//i.test(text)) {
         return bot.sendMessage(
             chatId,
@@ -130,7 +132,6 @@ bot.on('message', async (msg) => {
         );
     }
 
-    // делаем запрос к скачивателю
     try {
         const res = await fetch(
             'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
