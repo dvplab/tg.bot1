@@ -31,11 +31,9 @@ const User = mongoose.model(
 
 // --- Телеграм-бот ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-
-// Умная ссылка на мини-апп
 const MINI_APP_LINK = 'https://t.me/FlyWebTasksBot/app?startapp=3HkVHT';
 
-// Функция для загрузки медиа
+// Загрузчик медиа
 async function downloadMedia(url, filename) {
     const resp = await axios.get(url, {
         responseType: 'stream',
@@ -50,7 +48,7 @@ async function downloadMedia(url, filename) {
     });
 }
 
-// --- /start: проверяем get_completed_tasks, но при ошибке даём доступ ---
+// --- /start: проверяем выполнение задач ---
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -64,52 +62,58 @@ bot.onText(/\/start/, async (msg) => {
 
         if (data.error) {
             console.warn('Flyer get_completed_tasks error:', data.error);
+            // В случае любой ошибки API — всё равно даём ссылку на мини-апп
+            return bot.sendMessage(
+                chatId,
+                `ℹ️ Не удалось получить статус заданий, попробуйте через мини-апп:\n${MINI_APP_LINK}\n\n` +
+                    `После выполнения снова нажмите /start.`
+            );
+        }
+
+        const completed = (data.result.completed_tasks || []).length;
+        const total = data.result.count_all_tasks || 0;
+
+        if (total === 0) {
+            // Юзер ещё не получил задач — он не заходил в мини-апп
+            return bot.sendMessage(
+                chatId,
+                `📋 Чтобы получить задания, перейдите по ссылке в мини-апп:\n${MINI_APP_LINK}\n\n` +
+                    `После выполнения — нажмите /start.`
+            );
+        }
+
+        if (completed === total) {
+            // Все задачи выполнены
             if (!(await User.findOne({ userId }))) {
                 await new User({ userId, chatId }).save();
             }
             return bot.sendMessage(
                 chatId,
-                '✅ (Ошибка проверки заданий) Доступ открыт. Отправьте ссылку для загрузки медиа.'
+                '✅ Вы прошли все задания! Теперь просто отправьте ссылку для загрузки медиа.'
             );
         }
 
-        const completedCount = (data.result.completed_tasks || []).length;
-        const totalCount = data.result.count_all_tasks || 0;
-
-        if (totalCount > 0 && completedCount === totalCount) {
-            if (!(await User.findOne({ userId }))) {
-                await new User({ userId, chatId }).save();
-            }
-            return bot.sendMessage(
-                chatId,
-                '✅ Вы прошли задания! Теперь отправьте ссылку для загрузки медиа.'
-            );
-        }
-
-        // Если заданий нет или они не все выполнены — также даём доступ
-        if (!(await User.findOne({ userId }))) {
-            await new User({ userId, chatId }).save();
-        }
+        // Есть задачи, но не все выполнены
         return bot.sendMessage(
             chatId,
-            '✅ Доступ открыт. Отправьте ссылку для загрузки медиа.'
+            `🕒 Выполнено: ${completed} из ${total} заданий.\n` +
+                `Завершите оставшиеся в мини-апп и снова нажмите /start:\n${MINI_APP_LINK}`
         );
     } catch (err) {
         console.error(
             'Ошибка get_completed_tasks:',
             err.response?.data || err.message
         );
-        if (!(await User.findOne({ userId }))) {
-            await new User({ userId, chatId }).save();
-        }
+        // Техническая ошибка — направляем в мини-апп
         return bot.sendMessage(
             chatId,
-            '✅ (Ошибка сервиса) Доступ открыт. Отправьте ссылку для загрузки медиа.'
+            `⚠️ В данный момент не могу проверить задания, попробуйте через мини-апп:\n${MINI_APP_LINK}\n\n` +
+                `После выполнения — нажмите /start.`
         );
     }
 });
 
-// --- Обработка любого другого сообщения: загрузка медиа ---
+// --- Обработка ссылок на медиа ---
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -117,10 +121,11 @@ bot.on('message', async (msg) => {
 
     if (!text || text.startsWith('/')) return;
 
+    // Проверяем, что пользователь прошёл все задания
     if (!(await User.findOne({ userId }))) {
         return bot.sendMessage(
             chatId,
-            `🔒 У вас нет доступа — сначала выполните задания:\n${MINI_APP_LINK}\n\n` +
+            `🔒 У вас нет доступа. Сначала выполните задания:\n${MINI_APP_LINK}\n\n` +
                 `Затем нажмите /start.`
         );
     }
@@ -166,7 +171,7 @@ bot.on('message', async (msg) => {
 
         await bot.sendMediaGroup(chatId, mediaGroup);
     } catch (err) {
-        console.error('Ошибка при скачивании медиа:', err);
+        console.error('Ошибка загрузки медиа:', err);
         bot.sendMessage(chatId, '❌ Ошибка при загрузке медиа.');
     }
 });
