@@ -7,15 +7,14 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import fetch from 'node-fetch'; // <-- обязательно
 
-// --- Конфиг ---
 const { TELEGRAM_TOKEN, RAPIDAPI_KEY, MONGO_URI, FLYER_API_KEY } = process.env;
 if (!TELEGRAM_TOKEN || !RAPIDAPI_KEY || !MONGO_URI || !FLYER_API_KEY) {
     console.error('❌ Проверьте, что все переменные окружения заданы');
     process.exit(1);
 }
 
-// --- MongoDB ---
 mongoose
     .connect(MONGO_URI)
     .then(() => console.log('✅ MongoDB подключена'))
@@ -29,11 +28,9 @@ const User = mongoose.model(
     })
 );
 
-// --- Телеграм-бот ---
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 const MINI_APP_LINK = 'https://t.me/FlyWebTasksBot/app?startapp=3HkVHT';
 
-// Загрузчик медиа
 async function downloadMedia(url, filename) {
     const resp = await axios.get(url, {
         responseType: 'stream',
@@ -48,7 +45,7 @@ async function downloadMedia(url, filename) {
     });
 }
 
-// --- /start: проверяем выполнение задач ---
+// --- /start — проверка только через Flyer ---
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -60,13 +57,10 @@ bot.onText(/\/start/, async (msg) => {
             { headers: { 'Content-Type': 'application/json' } }
         );
 
-        if (data.error) {
-            console.warn('Flyer get_completed_tasks error:', data.error);
-            // В случае любой ошибки API — всё равно даём ссылку на мини-апп
+        if (data.error || !data.result) {
             return bot.sendMessage(
                 chatId,
-                `ℹ️ Не удалось получить статус заданий, попробуйте через мини-апп:\n${MINI_APP_LINK}\n\n` +
-                    `После выполнения снова нажмите /start.`
+                `📋 Чтобы использовать бота, сначала выполните задания:\n${MINI_APP_LINK}\n\nЗатем нажмите /start.`
             );
         }
 
@@ -74,41 +68,32 @@ bot.onText(/\/start/, async (msg) => {
         const total = data.result.count_all_tasks || 0;
 
         if (total === 0) {
-            // Юзер ещё не получил задач — он не заходил в мини-апп
             return bot.sendMessage(
                 chatId,
-                `📋 Чтобы получить задания, перейдите по ссылке в мини-апп:\n${MINI_APP_LINK}\n\n` +
-                    `После выполнения — нажмите /start.`
+                `📋 Чтобы использовать бота, сначала перейдите в мини-апп:\n${MINI_APP_LINK}\n\nПосле выполнения заданий нажмите /start.`
             );
         }
 
-        if (completed === total) {
-            // Все задачи выполнены
-            if (!(await User.findOne({ userId }))) {
-                await new User({ userId, chatId }).save();
-            }
+        if (completed < total) {
             return bot.sendMessage(
                 chatId,
-                '✅ Вы прошли все задания! Теперь просто отправьте ссылку для загрузки медиа.'
+                `🕒 Выполнено: ${completed} из ${total} заданий.\nЗавершите остальные здесь:\n${MINI_APP_LINK}`
             );
         }
 
-        // Есть задачи, но не все выполнены
+        if (!(await User.findOne({ userId }))) {
+            await new User({ userId, chatId }).save();
+        }
+
         return bot.sendMessage(
             chatId,
-            `🕒 Выполнено: ${completed} из ${total} заданий.\n` +
-                `Завершите оставшиеся в мини-апп и снова нажмите /start:\n${MINI_APP_LINK}`
+            '✅ Все задания выполнены! Теперь отправьте ссылку на медиа.'
         );
     } catch (err) {
-        console.error(
-            'Ошибка get_completed_tasks:',
-            err.response?.data || err.message
-        );
-        // Техническая ошибка — направляем в мини-апп
+        console.error('Flyer API error:', err.response?.data || err.message);
         return bot.sendMessage(
             chatId,
-            `⚠️ В данный момент не могу проверить задания, попробуйте через мини-апп:\n${MINI_APP_LINK}\n\n` +
-                `После выполнения — нажмите /start.`
+            `⚠️ Не удалось проверить задания. Попробуйте позже или пройдите по ссылке:\n${MINI_APP_LINK}`
         );
     }
 });
@@ -121,23 +106,26 @@ bot.on('message', async (msg) => {
 
     if (!text || text.startsWith('/')) return;
 
-    // Проверяем, что пользователь прошёл все задания
-    if (!(await User.findOne({ userId }))) {
-        return bot.sendMessage(
-            chatId,
-            `🔒 У вас нет доступа. Сначала выполните задания:\n${MINI_APP_LINK}\n\n` +
-                `Затем нажмите /start.`
-        );
-    }
-
-    if (!/^https?:\/\//i.test(text)) {
-        return bot.sendMessage(
-            chatId,
-            '📎 Пожалуйста, отправьте корректную ссылку.'
-        );
-    }
-
     try {
+        const user = await User.findOne({ userId });
+        if (!user) {
+            await bot.sendMessage(
+                chatId,
+                `🔒 У вас нет доступа. Сначала выполните задания:\n${MINI_APP_LINK}\n\nЗатем нажмите /start.`
+            );
+            await SendPostToChat(chatId);
+            return;
+        }
+
+        if (!/^https?:\/\//i.test(text)) {
+            await bot.sendMessage(
+                chatId,
+                '📎 Пожалуйста, отправьте корректную ссылку.'
+            );
+            await SendPostToChat(chatId);
+            return;
+        }
+
         const res = await fetch(
             'https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink',
             {
@@ -151,18 +139,23 @@ bot.on('message', async (msg) => {
                 body: JSON.stringify({ url: text }),
             }
         );
+
         const result = await res.json();
 
         if (!Array.isArray(result.medias) || result.medias.length === 0) {
-            return bot.sendMessage(chatId, '❌ Медиа не найдено.');
+            await bot.sendMessage(chatId, '❌ Медиа не найдено.');
+            await SendPostToChat(chatId);
+            return;
         }
 
         const mediaGroup = [];
+
         for (let i = 0; i < result.medias.length && i < 10; i++) {
             const m = result.medias[i];
             const ext = m.type === 'video' ? 'mp4' : 'jpg';
             const fn = `media_${Date.now()}_${i}.${ext}`;
             const filePath = await downloadMedia(m.url, fn);
+
             mediaGroup.push({
                 type: m.type === 'video' ? 'video' : 'photo',
                 media: fs.createReadStream(filePath),
@@ -172,8 +165,37 @@ bot.on('message', async (msg) => {
         await bot.sendMediaGroup(chatId, mediaGroup);
     } catch (err) {
         console.error('Ошибка загрузки медиа:', err);
-        bot.sendMessage(chatId, '❌ Ошибка при загрузке медиа.');
+        await bot.sendMessage(chatId, '❌ Ошибка при загрузке медиа.');
+    } finally {
+        await SendPostToChat(chatId); // ✅ Показываем рекламу в любом случае
     }
 });
 
 bot.on('polling_error', console.error);
+
+// --- Рекламная вставка ---
+async function SendPostToChat(chatId) {
+    const token =
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyNzYzNyIsImp0aSI6ImQ2MDA3M2YwLTgxMTctNDc4Yy1hNjQ2LWEyNDQ4YjEyNWZkNiIsIm5hbWUiOiJEb3dubG9hZFZpZGVvQm90IiwiYm90aWQiOiIxNDgxNCIsImh0dHA6Ly9zY2hlbWFzLnhtbHNvYXAub3JnL3dzLzIwMDUvMDUvaWRlbnRpdHkvY2xhaW1zL25hbWVpZGVudGlmaWVyIjoiMjc2MzciLCJuYmYiOjE3NDkyMzQxMzAsImV4cCI6MTc0OTQ0MjkzMCwiaXNzIjoiU3R1Z25vdiIsImF1ZCI6IlVzZXJzIn0.MIVMoDtUIRSuIrpv9b9vqUOXoqwkioDtP0DnNnlo9m0';
+
+    try {
+        const res = await fetch('https://api.gramads.net/ad/SendPost', {
+            method: 'POST',
+            headers: {
+                Authorization: `bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ SendToChatId: chatId }),
+        });
+
+        if (!res.ok) {
+            console.warn(`⚠️ Реклама не отправлена: ${res.statusText}`);
+            return;
+        }
+
+        const result = await res.text();
+        console.log(`📢 Реклама отправлена в чат ${chatId}`);
+    } catch (err) {
+        console.warn('❌ Ошибка при отправке рекламы:', err.message);
+    }
+}
